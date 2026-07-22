@@ -2,17 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.data_collection import MarketDataCollector, NewsCollector
 from src.portfolio_optimization import PortfolioOptimizer
 from src.backtesting import Backtester
 from src.sentiment_analysis import SentimentAnalyzer
-from src.factsheet import FactSheetGenerator
 
 st.set_page_config(
     page_title="FinVest Pro - Systematic Multi-Asset Investment Platform",
@@ -20,450 +19,389 @@ st.set_page_config(
     layout="wide"
 )
 
-@st.cache_data
-def load_data():
-    """Load and cache market data."""
-    collector = MarketDataCollector()
-    
-    equity_tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'JPM', 'V']
-    crypto_symbols = ['BTC', 'ETH']
-    
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
-    
-    equity_data = collector.fetch_equity_data(equity_tickers, start_date, end_date)
-    crypto_data = collector.fetch_crypto_data(crypto_symbols, start_date, end_date)
-    
-    return equity_data, crypto_data, collector.get_risk_free_rate()
+# Asset universe matching Part A
+EQUITY_TICKERS = ['AAPL', 'MSFT', 'JPM', 'XOM', 'KO']
+EQUITY_SECTORS = {
+    'AAPL': 'Technology',
+    'MSFT': 'Technology',
+    'JPM': 'Financials',
+    'XOM': 'Energy',
+    'KO': 'Consumer'
+}
+CRYPTO_SYMBOLS = ['BTC', 'ETH', 'SOL', 'ADA', 'DOGE']
+RF_ANNUAL = 0.04
 
 
 @st.cache_data
-def optimize_portfolios(equity_returns, crypto_returns, combined_returns, rf):
-    """Optimize all portfolios."""
-    optimizer = PortfolioOptimizer(rf)
-    
+def generate_data():
+    """
+    Generate synthetic market data matching Part A exactly.
+    Uses simple returns (pct_change), not log returns.
+    """
+    np.random.seed(42)
+
+    dates = pd.bdate_range(start='2022-01-03', end='2024-12-31', freq='B')
+    n_days = len(dates)
+
+    stocks = {
+        'AAPL': {'base_price': 170, 'drift': 0.12, 'vol': 0.25},
+        'MSFT': {'base_price': 330, 'drift': 0.15, 'vol': 0.22},
+        'JPM':  {'base_price': 140, 'drift': 0.08, 'vol': 0.28},
+        'XOM':  {'base_price': 90, 'drift': 0.10, 'vol': 0.32},
+        'KO':   {'base_price': 60, 'drift': 0.06, 'vol': 0.18}
+    }
+
+    cryptos = {
+        'BTC': {'base_price': 42000, 'drift': 0.25, 'vol': 0.65},
+        'ETH': {'base_price': 2200, 'drift': 0.30, 'vol': 0.75},
+        'SOL': {'base_price': 100, 'drift': 0.40, 'vol': 0.90},
+        'ADA': {'base_price': 0.50, 'drift': 0.20, 'vol': 0.85},
+        'DOGE': {'base_price': 0.10, 'drift': 0.15, 'vol': 1.00}
+    }
+
+    stock_corr = np.array([
+        [1.00, 0.75, 0.40, 0.20, 0.30],
+        [0.75, 1.00, 0.45, 0.25, 0.35],
+        [0.40, 0.45, 1.00, 0.50, 0.40],
+        [0.20, 0.25, 0.50, 1.00, 0.35],
+        [0.30, 0.35, 0.40, 0.35, 1.00]
+    ])
+
+    crypto_corr = np.array([
+        [1.00, 0.85, 0.70, 0.65, 0.55],
+        [0.85, 1.00, 0.75, 0.70, 0.60],
+        [0.70, 0.75, 1.00, 0.65, 0.55],
+        [0.65, 0.70, 0.65, 1.00, 0.50],
+        [0.55, 0.60, 0.55, 0.50, 1.00]
+    ])
+
+    def gen_corr_returns(n, corr, drifts, vols):
+        L = np.linalg.cholesky(corr)
+        indep = np.random.randn(n, len(drifts))
+        return drifts + indep @ L.T * vols
+
+    stock_drifts = np.array([s['drift'] / 252 for s in stocks.values()])
+    stock_vols = np.array([s['vol'] / np.sqrt(252) for s in stocks.values()])
+    stock_rets = gen_corr_returns(n_days, stock_corr, stock_drifts, stock_vols)
+
+    crypto_drifts = np.array([c['drift'] / 252 for c in cryptos.values()])
+    crypto_vols = np.array([c['vol'] / np.sqrt(252) for c in cryptos.values()])
+    crypto_rets = gen_corr_returns(n_days, crypto_corr, crypto_drifts, crypto_vols)
+
+    def rets_to_prices(rets, bases, tickers):
+        p = pd.DataFrame(index=dates)
+        for i, t in enumerate(tickers):
+            p[t] = bases[i] * np.exp(np.cumsum(rets[:, i]))
+        return p
+
+    stock_prices = rets_to_prices(stock_rets, [s['base_price'] for s in stocks.values()], list(stocks.keys()))
+    crypto_prices = rets_to_prices(crypto_rets, [c['base_price'] for c in cryptos.values()], list(cryptos.keys()))
+
+    # AAPL 4:1 split on 2023-06-15
+    split_date = pd.Timestamp('2023-06-15')
+    stock_prices.loc[stock_prices.index < split_date, 'AAPL'] *= 4.0
+
+    # SIMPLE returns (pct_change), matching Part A
+    stock_returns = stock_prices.pct_change(fill_method=None).dropna()
+    crypto_returns = crypto_prices.pct_change(fill_method=None).dropna()
+    combined_returns = pd.concat([stock_returns, crypto_returns], axis=1).dropna()
+
+    return stock_prices, crypto_prices, stock_returns, crypto_returns, combined_returns
+
+
+@st.cache_data
+def optimize_all_portfolios(stock_returns, crypto_returns, combined_returns):
+    """Optimise all portfolios matching Part A."""
+    optimizer = PortfolioOptimizer(risk_free_rate=RF_ANNUAL)
     results = {}
-    
-    equity_methods = ['max_sharpe', 'min_variance', 'risk_parity', 'equal_weight']
-    for method in equity_methods:
-        weights, metrics = getattr(optimizer, f'optimize_{method}')(equity_returns)
-        results[f'equity_{method}'] = {'weights': weights, 'metrics': metrics}
-    
-    for method in equity_methods:
-        weights, metrics = getattr(optimizer, f'optimize_{method}')(crypto_returns)
-        results[f'crypto_{method}'] = {'weights': weights, 'metrics': metrics}
-    
-    for method in equity_methods:
-        weights, metrics = getattr(optimizer, f'optimize_{method}')(combined_returns)
-        results[f'combined_{method}'] = {'weights': weights, 'metrics': metrics}
-    
+
+    for name, rets in [('equity', stock_returns), ('crypto', crypto_returns), ('combined', combined_returns)]:
+        for method in ['max_sharpe', 'min_variance', 'risk_parity', 'equal_weight']:
+            fn = getattr(optimizer, f'optimize_{method}')
+            w, m = fn(rets)
+            results[f'{name}_{method}'] = {'weights': w, 'metrics': m}
+
     return results
 
 
 @st.cache_data
-def run_backtests(equity_returns, crypto_returns, combined_returns, rf):
-    """Run backtests for all strategies."""
-    backtester = Backtester(rf)
-    
+def run_all_backtests(stock_returns, crypto_returns, combined_returns):
+    """Run OOS backtests matching Part A."""
+    bt = Backtester(risk_free_rate=RF_ANNUAL)
     methods = ['max_sharpe', 'min_variance', 'risk_parity', 'equal_weight']
-    
-    equity_backtests = backtester.compare_strategies(equity_returns, methods)
-    crypto_backtests = backtester.compare_strategies(crypto_returns, methods)
-    combined_backtests = backtester.compare_strategies(combined_returns, methods)
-    
-    return equity_backtests, crypto_backtests, combined_backtests
+    results = {}
+    for name, rets in [('equity', stock_returns), ('crypto', crypto_returns), ('combined', combined_returns)]:
+        for method in methods:
+            results[f'{name}_{method}'] = bt.rolling_backtest(rets, lookback_days=252, rebalance_freq=21, method=method)
+    return results
 
 
 @st.cache_data
-def analyze_sentiment():
-    """Analyze news sentiment."""
-    collector = NewsCollector()
-    analyzer = SentimentAnalyzer()
-    
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-    
-    news = collector.fetch_news(
-        "stock market OR cryptocurrency OR economy",
-        start_date,
-        end_date
-    )
-    
-    sentiment_df = analyzer.analyze_news_batch(news)
-    sentiment_index = analyzer.build_sentiment_index(sentiment_df)
-    sentiment_summary = analyzer.get_sentiment_summary(sentiment_df)
-    
-    return sentiment_df, sentiment_index, sentiment_summary
+def generate_sentiment_data():
+    """Generate synthetic sentiment data matching Part A (5 sectors)."""
+    np.random.seed(123)
+    dates = pd.bdate_range(start='2022-01-03', end='2024-12-31', freq='B')
+    n_days = len(dates)
+    sectors = ['Technology', 'Financials', 'Energy', 'Consumer', 'Technology']
+    tickers = ['AAPL', 'MSFT', 'JPM', 'XOM', 'KO']
+
+    records = []
+    for _ in range(5000):
+        si = np.random.randint(0, len(sectors))
+        di = np.random.randint(0, n_days)
+        s = np.clip(np.random.normal(0.05, 0.3), -1, 1)
+        records.append({
+            'date': dates[di],
+            'sector': sectors[si],
+            'ticker': tickers[si],
+            'sentiment_score': s,
+            'sentiment_label': 'Positive' if s > 0.1 else ('Negative' if s < -0.1 else 'Neutral'),
+            'confidence': abs(s)
+        })
+
+    return pd.DataFrame(records)
 
 
 def main():
     st.sidebar.title("FinVest Pro")
     st.sidebar.markdown("**Systematic Multi-Asset Investment Platform**")
-    
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Dashboard", "Fund Comparison", "Sentiment Analytics", "Invest"]
-    )
-    
-    equity_data, crypto_data, rf = load_data()
-    
-    equity_returns = np.log(equity_data / equity_data.shift(1)).dropna()
-    crypto_returns = np.log(crypto_data / crypto_data.shift(1)).dropna()
-    
-    combined_prices = pd.concat([equity_data, crypto_data], axis=1)
-    combined_returns = np.log(combined_prices / combined_prices.shift(1)).dropna()
-    
-    portfolio_results = optimize_portfolios(
-        equity_returns, crypto_returns, combined_returns, rf
-    )
-    
-    equity_backtests, crypto_backtests, combined_backtests = run_backtests(
-        equity_returns, crypto_returns, combined_returns, rf
-    )
-    
+
+    page = st.sidebar.radio("Navigation", ["Dashboard", "Fund Comparison", "Sentiment Analytics", "Invest"])
+
+    stock_prices, crypto_prices, stock_returns, crypto_returns, combined_returns = generate_data()
+    portfolio_results = optimize_all_portfolios(stock_returns, crypto_returns, combined_returns)
+    backtest_results = run_all_backtests(stock_returns, crypto_returns, combined_returns)
+
     if page == "Dashboard":
-        render_dashboard(
-            portfolio_results, equity_backtests, 
-            crypto_backtests, combined_backtests
-        )
+        render_dashboard(portfolio_results, backtest_results)
     elif page == "Fund Comparison":
-        render_fund_comparison(
-            portfolio_results, equity_backtests,
-            crypto_backtests, combined_backtests
-        )
+        render_fund_comparison(portfolio_results, backtest_results)
     elif page == "Sentiment Analytics":
         render_sentiment_analytics()
     elif page == "Invest":
         render_invest(portfolio_results)
 
 
-def render_dashboard(portfolio_results, equity_bt, crypto_bt, combined_bt):
+def render_dashboard(portfolio_results, bt):
     st.title("📈 FinVest Pro Dashboard")
-    
+
     st.markdown("""
     Welcome to FinVest Pro, your systematic multi-asset investment platform.
     Browse our fund offerings and invest in professionally managed portfolios.
     """)
-    
+
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
-        st.metric(
-            "Equity Fund (Max Sharpe)",
-            f"{portfolio_results['equity_max_sharpe']['metrics']['annual_return']:.2%}",
-            f"Sharpe: {portfolio_results['equity_max_sharpe']['metrics']['sharpe_ratio']:.2f}"
-        )
-    
+        m = portfolio_results['equity_max_sharpe']['metrics']
+        st.metric("Equity Fund (Max Sharpe)", f"{m['annual_return']:.2%}", f"Sharpe: {m['sharpe_ratio']:.2f}")
+
     with col2:
-        st.metric(
-            "Crypto Fund (Max Sharpe)",
-            f"{portfolio_results['crypto_max_sharpe']['metrics']['annual_return']:.2%}",
-            f"Sharpe: {portfolio_results['crypto_max_sharpe']['metrics']['sharpe_ratio']:.2f}"
-        )
-    
+        m = portfolio_results['crypto_max_sharpe']['metrics']
+        st.metric("Crypto Fund (Max Sharpe)", f"{m['annual_return']:.2%}", f"Sharpe: {m['sharpe_ratio']:.2f}")
+
     with col3:
-        st.metric(
-            "Combined Fund (Max Sharpe)",
-            f"{portfolio_results['combined_max_sharpe']['metrics']['annual_return']:.2%}",
-            f"Sharpe: {portfolio_results['combined_max_sharpe']['metrics']['sharpe_ratio']:.2f}"
-        )
-    
-    st.subheader("Fund Performance Overview")
-    
+        m = portfolio_results['combined_max_sharpe']['metrics']
+        st.metric("Combined Fund (Max Sharpe)", f"{m['annual_return']:.2%}", f"Sharpe: {m['sharpe_ratio']:.2f}")
+
+    st.subheader("Out-of-Sample Fund Performance")
+
     fig = go.Figure()
-    
     funds = {
-        'Equity Fund': equity_bt['max_sharpe'],
-        'Crypto Fund': crypto_bt['max_sharpe'],
-        'Combined Fund': combined_bt['max_sharpe']
+        'Equity Fund': bt['equity_max_sharpe'],
+        'Crypto Fund': bt['crypto_max_sharpe'],
+        'Combined Fund': bt['combined_max_sharpe']
     }
-    
+
     for name, data in funds.items():
-        fig.add_trace(go.Scatter(
-            x=data.index,
-            y=data['cumulative_return'],
-            name=name,
-            line=dict(width=2)
-        ))
-    
-    fig.update_layout(
-        title="Growth of $1 - All Funds",
-        xaxis_title="Date",
-        yaxis_title="Value ($)",
-        hovermode="x unified",
-        template="plotly_white"
-    )
-    
+        fig.add_trace(go.Scatter(x=data.index, y=data['cumulative_return'], name=name, line=dict(width=2)))
+
+    fig.update_layout(title="Growth of $1 — All Funds (OOS)", xaxis_title="Date", yaxis_title="Value ($)",
+                      hovermode="x unified", template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
+    st.subheader("Strategy Comparison (Combined Fund)")
+    fig2 = go.Figure()
+    for method, label in [('max_sharpe', 'Max Sharpe'), ('min_variance', 'Min Variance'),
+                          ('risk_parity', 'Risk Parity'), ('equal_weight', 'Equal Weight')]:
+        data = bt[f'combined_{method}']
+        fig2.add_trace(go.Scatter(x=data.index, y=data['cumulative_return'], name=label, line=dict(width=1.5)))
 
-def render_fund_comparison(portfolio_results, equity_bt, crypto_bt, combined_bt):
+    fig2.update_layout(title="Combined Fund — All Strategies (OOS)", xaxis_title="Date", yaxis_title="Value ($)",
+                       hovermode="x unified", template="plotly_white")
+    st.plotly_chart(fig2, use_container_width=True)
+
+
+def render_fund_comparison(portfolio_results, bt):
     st.title("📊 Fund Comparison")
-    
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        fund_type = st.selectbox(
-            "Select Fund Type",
-            ["Equity", "Crypto", "Combined"]
-        )
-    
+        fund_type = st.selectbox("Select Fund Type", ["Equity", "Crypto", "Combined"])
     with col2:
-        strategy = st.selectbox(
-            "Select Strategy",
-            ["Maximum Sharpe", "Minimum Variance", "Risk Parity", "Equal Weight"]
-        )
-    
-    strategy_map = {
-        "Maximum Sharpe": "max_sharpe",
-        "Minimum Variance": "min_variance",
-        "Risk Parity": "risk_parity",
-        "Equal Weight": "equal_weight"
-    }
-    
+        strategy = st.selectbox("Select Strategy", ["Maximum Sharpe", "Minimum Variance", "Risk Parity", "Equal Weight"])
+
+    strategy_map = {"Maximum Sharpe": "max_sharpe", "Minimum Variance": "min_variance",
+                    "Risk Parity": "risk_parity", "Equal Weight": "equal_weight"}
+
     fund_key = f"{fund_type.lower()}_{strategy_map[strategy]}"
-    backtest_key = strategy_map[strategy]
-    
     metrics = portfolio_results[fund_key]['metrics']
     weights = portfolio_results[fund_key]['weights']
-    
+
     if fund_type == "Equity":
-        assets = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'JPM', 'V']
-        backtest_data = equity_bt[backtest_key]
+        assets = EQUITY_TICKERS
     elif fund_type == "Crypto":
-        assets = ['BTC-USD', 'ETH-USD']
-        backtest_data = crypto_bt[backtest_key]
+        assets = CRYPTO_SYMBOLS
     else:
-        assets = list(equity_data.columns) + list(crypto_data.columns)
-        backtest_data = combined_bt[backtest_key]
-    
-    st.subheader(f"{fund_type} Fund - {strategy}")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Annual Return", f"{metrics['annual_return']:.2%}")
-    with col2:
-        st.metric("Annual Volatility", f"{metrics['annual_volatility']:.2%}")
-    with col3:
-        st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-    with col4:
-        st.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        fig_growth = go.Figure()
-        fig_growth.add_trace(go.Scatter(
-            x=metrics['cumulative_returns'].index,
-            y=metrics['cumulative_returns'].values,
-            name='Fund',
-            line=dict(width=2)
-        ))
-        fig_growth.update_layout(
-            title="Growth of $1",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_growth, use_container_width=True)
-    
-    with col2:
-        fig_dd = go.Figure()
-        fig_dd.add_trace(go.Scatter(
-            x=metrics['drawdowns'].index,
-            y=metrics['drawdowns'].values,
-            fill='tozeroy',
-            name='Drawdown',
-            line=dict(color='red', width=1)
-        ))
-        fig_dd.update_layout(
-            title="Drawdowns",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_dd, use_container_width=True)
-    
+        assets = EQUITY_TICKERS + CRYPTO_SYMBOLS
+
+    st.subheader(f"{fund_type} Fund — {strategy}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Annual Return", f"{metrics['annual_return']:.2%}")
+    c2.metric("Annual Volatility", f"{metrics['annual_volatility']:.2%}")
+    c3.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
+    c4.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig_g = go.Figure()
+        fig_g.add_trace(go.Scatter(x=metrics['cumulative_returns'].index, y=metrics['cumulative_returns'].values,
+                                   name='Fund', line=dict(width=2)))
+        fig_g.update_layout(title="Growth of $1 (In-Sample)", template="plotly_white")
+        st.plotly_chart(fig_g, use_container_width=True)
+
+    with c2:
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Scatter(x=metrics['drawdowns'].index, y=metrics['drawdowns'].values,
+                                   fill='tozeroy', name='Drawdown', line=dict(color='red', width=1)))
+        fig_d.update_layout(title="Drawdowns (In-Sample)", template="plotly_white")
+        st.plotly_chart(fig_d, use_container_width=True)
+
+    st.subheader("Out-of-Sample Backtest")
+    bt_data = bt[fund_key]
+    fig_bt = go.Figure()
+    fig_bt.add_trace(go.Scatter(x=bt_data.index, y=bt_data['cumulative_return'], name='OOS Return', line=dict(width=2)))
+    fig_bt.update_layout(title="Out-of-Sample Growth of $1", xaxis_title="Date", yaxis_title="Value ($)",
+                         template="plotly_white")
+    st.plotly_chart(fig_bt, use_container_width=True)
+
     st.subheader("Current Holdings")
-    
-    holdings_df = pd.DataFrame({
-        'Asset': assets,
-        'Weight': weights
-    })
-    holdings_df = holdings_df[holdings_df['Weight'] > 0.01]
-    
-    fig_holdings = go.Figure(data=[go.Pie(
-        labels=holdings_df['Asset'],
-        values=holdings_df['Weight'],
-        hole=0.3
-    )])
-    fig_holdings.update_layout(title="Portfolio Allocation")
-    st.plotly_chart(fig_holdings, use_container_width=True)
+    holdings = pd.DataFrame({'Asset': assets, 'Weight': weights})
+    holdings = holdings[holdings['Weight'] > 0.01]
+
+    fig_pie = go.Figure(data=[go.Pie(labels=holdings['Asset'], values=holdings['Weight'], hole=0.3)])
+    fig_pie.update_layout(title="Portfolio Allocation")
+    st.plotly_chart(fig_pie, use_container_width=True)
 
 
 def render_sentiment_analytics():
     st.title("📰 News Sentiment Analytics")
-    
-    sentiment_df, sentiment_index, sentiment_summary = analyze_sentiment()
-    
-    st.subheader("Market Sentiment Index")
-    
+
+    sentiment_df = generate_sentiment_data()
+
+    st.subheader("Sector Sentiment Overview")
+
     fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=sentiment_index.index,
-        y=sentiment_index['sentiment_score'],
-        name='Daily Sentiment',
-        line=dict(color='blue', width=1),
-        opacity=0.5
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=sentiment_index.index,
-        y=sentiment_index['sentiment_ma7'],
-        name='7-Day MA',
-        line=dict(color='orange', width=2)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=sentiment_index.index,
-        y=sentiment_index['sentiment_ma30'],
-        name='30-Day MA',
-        line=dict(color='green', width=2)
-    ))
-    
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    
-    fig.update_layout(
-        title="Market Sentiment Over Time",
-        xaxis_title="Date",
-        yaxis_title="Sentiment Score",
-        template="plotly_white"
-    )
-    
+    sector_colors = {'Technology': '#08519c', 'Financials': '#cb181d', 'Energy': '#d94701', 'Consumer': '#238b45'}
+
+    for sector in sentiment_df['sector'].unique():
+        sd = sentiment_df[sentiment_df['sector'] == sector]
+        daily = sd.groupby('date')['sentiment_score'].mean()
+        ma7 = daily.rolling(7).mean()
+        fig.add_trace(go.Scatter(x=ma7.index, y=ma7.values, name=sector,
+                                 line=dict(color=sector_colors.get(sector, '#636363'), width=1.5)))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    fig.update_layout(title="7-Day MA Sentiment by Sector", xaxis_title="Date", yaxis_title="Sentiment Score",
+                      template="plotly_white", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Mean Sentiment", f"{sentiment_summary['mean_sentiment']:.3f}")
-    with col2:
-        st.metric("Positive", f"{sentiment_summary['pct_positive']:.1%}")
-    with col3:
-        st.metric("Negative", f"{sentiment_summary['pct_negative']:.1%}")
-    with col4:
-        st.metric("Neutral", f"{sentiment_summary['pct_neutral']:.1%}")
-    
-    st.subheader("Recent News Headlines")
-    
-    recent_news = sentiment_df.head(20)
-    
-    for _, row in recent_news.iterrows():
-        sentiment_color = "green" if row['sentiment_score'] > 0.3 else "red" if row['sentiment_score'] < -0.3 else "gray"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Mean Sentiment", f"{sentiment_df['sentiment_score'].mean():.3f}")
+    c2.metric("Positive", f"{(sentiment_df['sentiment_label'] == 'Positive').mean():.1%}")
+    c3.metric("Negative", f"{(sentiment_df['sentiment_label'] == 'Negative').mean():.1%}")
+    c4.metric("Neutral", f"{(sentiment_df['sentiment_label'] == 'Neutral').mean():.1%}")
+
+    st.subheader("Sector Sentiment Correlation")
+    pivot = sentiment_df.pivot_table(values='sentiment_score', index='date', columns='sector').rolling(21).mean()
+    corr = pivot.corr()
+
+    fig_corr = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns,
+                                          colorscale='RdBu_r', zmin=-1, zmax=1, text=corr.round(2).values,
+                                          texttemplate='%{text}', textfont=dict(size=11)))
+    fig_corr.update_layout(title="Cross-Sector Sentiment Correlation (60-day rolling)", template="plotly_white")
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+    st.subheader("Recent Headlines")
+    recent = sentiment_df.sort_values('date', ascending=False).head(20)
+    for _, row in recent.iterrows():
+        color = "green" if row['sentiment_score'] > 0.1 else ("red" if row['sentiment_score'] < -0.1 else "gray")
         st.markdown(f"""
-        <div style="padding: 10px; border-left: 4px solid {sentiment_color}; margin-bottom: 10px;">
-            <strong>{row['headline']}</strong><br>
-            <small>Sentiment: {row['sentiment_label']} ({row['sentiment_score']:.3f})</small>
+        <div style="padding: 8px; border-left: 4px solid {color}; margin-bottom: 8px;">
+            <strong>{row['ticker']}</strong> ({row['sector']}) — {row['date'].strftime('%Y-%m-%d')}<br>
+            Sentiment: {row['sentiment_label']} ({row['sentiment_score']:.3f})
         </div>
         """, unsafe_allow_html=True)
 
 
 def render_invest(portfolio_results):
     st.title("💰 Invest")
-    
+
     st.markdown("""
     Select a fund and allocate your investment. FinVest Pro manages your portfolio
-    systematically using quantitative optimization methods.
+    systematically using quantitative optimisation methods.
     """)
-    
-    investment_amount = st.number_input(
-        "Investment Amount ($)",
-        min_value=100,
-        max_value=1000000,
-        value=10000,
-        step=100
-    )
-    
-    st.subheader("Select Fund")
-    
-    fund_options = {
-        "Equity Fund - Maximum Sharpe": "equity_max_sharpe",
-        "Equity Fund - Minimum Variance": "equity_min_variance",
-        "Equity Fund - Risk Parity": "equity_risk_parity",
-        "Crypto Fund - Maximum Sharpe": "crypto_max_sharpe",
-        "Crypto Fund - Minimum Variance": "crypto_min_variance",
-        "Crypto Fund - Risk Parity": "crypto_risk_parity",
-        "Combined Fund - Maximum Sharpe": "combined_max_sharpe",
-        "Combined Fund - Minimum Variance": "combined_min_variance",
-        "Combined Fund - Risk Parity": "combined_risk_parity"
-    }
-    
-    selected_fund = st.selectbox("Choose a fund", list(fund_options.keys()))
-    
-    fund_key = fund_options[selected_fund]
+
+    investment_amount = st.number_input("Investment Amount ($)", min_value=100, max_value=1000000, value=10000, step=100)
+
+    fund_options = {}
+    for ft in ['Equity', 'Crypto', 'Combined']:
+        for strat in ['Maximum Sharpe', 'Minimum Variance', 'Risk Parity']:
+            key = f"{ft} Fund — {strat}"
+            fund_options[key] = f"{ft.lower()}_{strat.lower().replace(' ', '_')}"
+
+    selected = st.selectbox("Select Fund", list(fund_options.keys()))
+    fund_key = fund_options[selected]
     metrics = portfolio_results[fund_key]['metrics']
     weights = portfolio_results[fund_key]['weights']
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Expected Annual Return", f"{metrics['annual_return']:.2%}")
-    with col2:
-        st.metric("Risk (Volatility)", f"{metrics['annual_volatility']:.2%}")
-    with col3:
-        st.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
-    with col4:
-        st.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
-    
-    st.subheader("Portfolio Allocation")
-    
-    if "equity" in fund_key:
-        assets = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'JPM', 'V']
-    elif "crypto" in fund_key:
-        assets = ['BTC', 'ETH']
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Expected Annual Return", f"{metrics['annual_return']:.2%}")
+    c2.metric("Risk (Volatility)", f"{metrics['annual_volatility']:.2%}")
+    c3.metric("Sharpe Ratio", f"{metrics['sharpe_ratio']:.2f}")
+    c4.metric("Max Drawdown", f"{metrics['max_drawdown']:.2%}")
+
+    if 'equity' in fund_key:
+        assets = EQUITY_TICKERS
+    elif 'crypto' in fund_key:
+        assets = CRYPTO_SYMBOLS
     else:
-        assets = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'JPM', 'V', 'BTC', 'ETH']
-    
-    allocations = {}
-    for i, asset in enumerate(assets):
-        if weights[i] > 0.01:
-            allocations[asset] = investment_amount * weights[i]
-    
-    alloc_df = pd.DataFrame([
-        {'Asset': k, 'Allocation ($)': f"${v:,.2f}", 'Weight': f"{v/investment_amount:.1%}"}
-        for k, v in allocations.items()
-    ])
-    
+        assets = EQUITY_TICKERS + CRYPTO_SYMBOLS
+
+    allocations = {a: investment_amount * w for a, w in zip(assets, weights) if w > 0.01}
+
+    alloc_df = pd.DataFrame([{'Asset': k, 'Allocation ($)': f"${v:,.2f}", 'Weight': f"{v/investment_amount:.1%}"}
+                             for k, v in allocations.items()])
     st.dataframe(alloc_df, use_container_width=True)
-    
+
     st.subheader("Investment Summary")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.markdown(f"""
         **Investment Amount:** ${investment_amount:,.2f}
-        
         **Expected Annual Return:** ${investment_amount * metrics['annual_return']:,.2f}
-        
         **Risk Level:** {metrics['annual_volatility']:.2%} volatility
         """)
-    
-    with col2:
+    with c2:
         st.markdown(f"""
         **Sharpe Ratio:** {metrics['sharpe_ratio']:.2f}
-        
         **Max Drawdown:** {metrics['max_drawdown']:.2%}
-        
         **Management Fee:** 1.5% p.a.
         """)
-    
+
     if st.button("Confirm Investment", type="primary"):
-        st.success(f"""
-        🎉 Investment Confirmed!
-        
-        You have invested ${investment_amount:,.2f} in **{selected_fund}**.
-        
-        Your portfolio will be managed systematically and rebalanced periodically.
-        """)
-        
+        st.success(f"🎉 Investment Confirmed! You have invested ${investment_amount:,.2f} in **{selected}**.")
         st.balloons()
 
 

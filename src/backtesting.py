@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, Tuple
-from .portfolio_optimization import PortfolioOptimizer
+try:
+    from .portfolio_optimization import PortfolioOptimizer
+except ImportError:
+    from portfolio_optimization import PortfolioOptimizer
 
 
 class Backtester:
